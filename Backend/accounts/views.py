@@ -120,7 +120,6 @@ class LogoutView(APIView):
 
 
 class RefreshTokenView(APIView):
-    """Silent token refresh — called automatically by the frontend."""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -129,9 +128,19 @@ class RefreshTokenView(APIView):
             return Response({"detail": "No refresh token."}, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
-            refresh = RefreshToken(refresh_token)
-            access_token = refresh.access_token
-        except (TokenError, InvalidToken):
+            old_refresh = RefreshToken(refresh_token)
+            user_id = old_refresh.payload[settings.SIMPLE_JWT["USER_ID_CLAIM"]]
+
+            # Blacklist the old one (consumes it — requires BLACKLIST_AFTER_ROTATION,
+            # but blacklisting explicitly here makes it robust either way)
+            old_refresh.blacklist()
+
+            user = User.objects.get(id=user_id)
+            new_refresh = RefreshToken.for_user(user)
+            new_refresh["role"] = user.role
+            new_refresh.access_token["role"] = user.role
+
+        except (TokenError, InvalidToken, User.DoesNotExist):
             response = Response(
                 {"detail": "Refresh token expired or invalid."}, status=status.HTTP_401_UNAUTHORIZED
             )
@@ -139,12 +148,7 @@ class RefreshTokenView(APIView):
             return response
 
         response = Response({"message": "Token refreshed."}, status=status.HTTP_200_OK)
-        response.set_cookie(
-            ACCESS_COOKIE,
-            str(access_token),
-            max_age=int(settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"].total_seconds()),
-            **COOKIE_DEFAULTS,
-        )
+        set_auth_cookies(response, new_refresh.access_token, new_refresh)
         return response
 
 
